@@ -110,17 +110,17 @@
       const [alertDialog, setAlertDialog] = useState({ isOpen: false, title: '', text: '' });
       const [isPixModalOpen, setIsPixModalOpen] = useState(false);
       
+      // Estados para produtos
       const [editingProduct, setEditingProduct] = useState(null);
       const [prodName, setProdName] = useState('');
       const [prodPrice, setProdPrice] = useState('');
+      const [prodStockType, setProdStockType] = useState('infinite'); // 'infinite' ou 'finite'
+      const [prodStockQty, setProdStockQty] = useState('');
       
       const [pixStudentName, setPixStudentName] = useState('');
       const [pixStudentClass, setPixStudentClass] = useState('');
       
-      // Estado para visualização de eventos anteriores
       const [viewingEvent, setViewingEvent] = useState(null);
-
-      // --- SISTEMA DE NOTIFICAÇÕES EMPILHADAS (TOAST) ---
       const [toasts, setToasts] = useState([]);
       const [isMuted, setIsMuted] = useState(false);
 
@@ -133,7 +133,7 @@
           oscillator.connect(gainNode);
           gainNode.connect(audioCtx.destination);
           oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
           gainNode.gain.setValueAtTime(0.05, audioCtx.currentTime);
           oscillator.start();
           gainNode.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.1);
@@ -142,7 +142,7 @@
       };
 
       const showToast = (message, type = 'success') => {
-        if (isMuted) return; // Se estiver silenciado, não exibe
+        if (isMuted) return; 
         const id = Date.now();
         setToasts(prev => [...prev, { id, message, type }]);
         playBeep();
@@ -156,7 +156,6 @@
         setToasts(prev => prev.filter(t => t.id !== id));
       };
 
-      // Persistência
       useEffect(() => { localStorage.setItem('pdv_theme', JSON.stringify(theme)); }, [theme]);
       useEffect(() => { localStorage.setItem('pdv_settings', JSON.stringify(settings)); }, [settings]);
       useEffect(() => { localStorage.setItem('pdv_event_logs', JSON.stringify(eventLogs)); }, [eventLogs]);
@@ -164,7 +163,6 @@
       useEffect(() => { localStorage.setItem('pdv_sales', JSON.stringify(sales)); }, [sales]);
       useEffect(() => { localStorage.setItem('pdv_cash_drawer', JSON.stringify(cashDrawer)); }, [cashDrawer]);
 
-      // Aplicação do Tema Dark/Light e Cores
       useEffect(() => {
         if (theme === 'dark') document.documentElement.classList.add('dark');
         else document.documentElement.classList.remove('dark');
@@ -175,14 +173,25 @@
         }
       }, [theme, settings.accentColor]);
 
-      // Utilitários
       const formatCurrency = (val) => val.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
       const formatDate = (isoString) => new Date(isoString).toLocaleString('pt-BR');
 
       // --- CAIXA E VENDAS ---
       const addToCart = (product) => {
+        if (product.stockType === 'finite' && product.stockQuantity <= 0) {
+          showToast('Produto esgotado!', 'error');
+          return;
+        }
+
         setCart(prev => {
           const exists = prev.find(i => i.product.id === product.id);
+          const currentQty = exists ? exists.quantity : 0;
+          
+          if (product.stockType === 'finite' && currentQty >= product.stockQuantity) {
+            showToast('Quantidade máxima em estoque atingida!', 'error');
+            return prev;
+          }
+
           if (exists) return prev.map(i => i.product.id === product.id ? { ...i, quantity: i.quantity + 1 } : i);
           return [...prev, { product, quantity: 1 }];
         });
@@ -217,6 +226,19 @@
           return;
         }
 
+        // Subtrai do estoque físico (se for finito)
+        setProducts(prevProducts => {
+          return prevProducts.map(p => {
+            if (p.stockType === 'finite') {
+              const inCart = cart.find(c => c.product.id === p.id);
+              if (inCart) {
+                return { ...p, stockQuantity: Math.max(0, p.stockQuantity - inCart.quantity) };
+              }
+            }
+            return p;
+          });
+        });
+
         const newSale = {
           id: Date.now().toString(),
           items: [...cart], subtotal: cartSubtotal, discount: cartDiscount, total: cartTotal,
@@ -224,16 +246,32 @@
           studentInfo: paymentMethod === 'PIX' ? { name: pixStudentName, schoolClass: pixStudentClass } : null
         };
 
-        setSales([newSale, ...sales]); clearCart();
+        setSales([newSale, ...sales]); 
+        clearCart();
         setPixStudentName(''); setPixStudentClass(''); setIsPixModalOpen(false);
 
         showToast(`Venda concluída: ${formatCurrency(cartTotal)} via ${paymentMethod}`);
       };
 
       const cancelSale = (saleId) => {
+        const saleToCancel = sales.find(s => s.id === saleId);
+        if (!saleToCancel) return;
+
         setConfirmDialog({
-          isOpen: true, title: 'Estornar Venda', text: 'Tem certeza que deseja estornar (cancelar) esta venda? Ela será removida do histórico atual.', isDanger: true,
+          isOpen: true, title: 'Estornar Venda', text: 'Tem certeza que deseja estornar (cancelar) esta venda? Ela será removida do histórico atual e os itens voltarão ao estoque.', isDanger: true,
           action: () => {
+            // Devolve itens para o estoque
+            setProducts(prevProducts => {
+              let updatedProducts = [...prevProducts];
+              saleToCancel.items.forEach(item => {
+                 const pIndex = updatedProducts.findIndex(p => p.id === item.product.id);
+                 if(pIndex !== -1 && updatedProducts[pIndex].stockType === 'finite') {
+                    updatedProducts[pIndex] = { ...updatedProducts[pIndex], stockQuantity: updatedProducts[pIndex].stockQuantity + item.quantity };
+                 }
+              });
+              return updatedProducts;
+            });
+
             setSales(sales.filter(s => s.id !== saleId));
             showToast('Venda estornada com sucesso!', 'info');
           }
@@ -244,16 +282,24 @@
       const saveProduct = (e) => {
         e.preventDefault();
         if (!prodName || !prodPrice) return;
+        if (prodStockType === 'finite' && (prodStockQty === '' || parseInt(prodStockQty) < 0)) {
+          showToast('Informe uma quantidade válida para o estoque.', 'error');
+          return;
+        }
+
         const priceNum = parseFloat(prodPrice.toString().replace(',', '.'));
+        const stockNum = prodStockType === 'finite' ? parseInt(prodStockQty) : null;
+
         if (editingProduct) {
-          setProducts(products.map(p => p.id === editingProduct.id ? { ...p, name: prodName, price: priceNum } : p));
+          setProducts(products.map(p => p.id === editingProduct.id ? { ...p, name: prodName, price: priceNum, stockType: prodStockType, stockQuantity: stockNum } : p));
           setEditingProduct(null);
           showToast('Produto atualizado com sucesso!');
         } else {
-          setProducts([...products, { id: Date.now().toString(), name: prodName, price: priceNum }]);
+          setProducts([...products, { id: Date.now().toString(), name: prodName, price: priceNum, stockType: prodStockType, stockQuantity: stockNum }]);
           showToast('Produto adicionado ao cardápio!');
         }
-        setProdName(''); setProdPrice('');
+        
+        setProdName(''); setProdPrice(''); setProdStockType('infinite'); setProdStockQty('');
       };
 
       const deleteProduct = (id) => {
@@ -659,9 +705,14 @@
                     </div>
                     <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-4 overflow-y-auto pb-4 pr-2">
                       {products.map(p => (
-                        <button key={p.id} onClick={() => addToCart(p)} className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl p-4 flex flex-col items-center justify-center text-center shadow-sm hover:border-brand transition-all active:scale-95 group">
+                        <button key={p.id} disabled={p.stockType === 'finite' && p.stockQuantity <= 0} onClick={() => addToCart(p)} className={`bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-2xl p-4 flex flex-col items-center justify-center text-center shadow-sm hover:border-brand transition-all active:scale-95 group ${p.stockType === 'finite' && p.stockQuantity <= 0 ? 'opacity-50 cursor-not-allowed grayscale hover:border-gray-300 dark:hover:border-gray-700' : ''}`}>
                           <span className="font-semibold mb-2 group-hover:text-brand">{p.name}</span>
-                          <span className="text-brand font-bold bg-brand/10 dark:bg-brand/20 px-3 py-1 rounded-lg">{formatCurrency(p.price)}</span>
+                          <span className="text-brand font-bold bg-brand/10 dark:bg-brand/20 px-3 py-1 rounded-lg mb-2">{formatCurrency(p.price)}</span>
+                          {p.stockType === 'finite' && (
+                            <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${p.stockQuantity > 0 ? 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300' : 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400'}`}>
+                              {p.stockQuantity > 0 ? `${p.stockQuantity} un. no estoque` : 'Esgotado'}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
@@ -728,12 +779,25 @@
                         <label className="block text-sm font-semibold mb-1">Nome do Produto</label>
                         <input type="text" value={prodName} onChange={e => setProdName(e.target.value)} required className="w-full p-3 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-xl outline-none" />
                       </div>
-                      <div className="w-full md:w-40">
+                      <div className="w-full md:w-32">
                         <label className="block text-sm font-semibold mb-1">Preço (R$)</label>
                         <input type="number" step="0.01" min="0" value={prodPrice} onChange={e => setProdPrice(e.target.value)} required className="w-full p-3 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-xl outline-none" />
                       </div>
+                      <div className="w-full md:w-32">
+                        <label className="block text-sm font-semibold mb-1">Tipo de Estoque</label>
+                        <select value={prodStockType} onChange={e => setProdStockType(e.target.value)} className="w-full p-3 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-xl outline-none">
+                          <option value="infinite">Infinito (∞)</option>
+                          <option value="finite">Finito</option>
+                        </select>
+                      </div>
+                      {prodStockType === 'finite' && (
+                        <div className="w-full md:w-24">
+                          <label className="block text-sm font-semibold mb-1">Quantidade</label>
+                          <input type="number" step="1" min="0" value={prodStockQty} onChange={e => setProdStockQty(e.target.value)} required className="w-full p-3 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-xl outline-none" />
+                        </div>
+                      )}
                       <div className="flex gap-2">
-                        {editingProduct && <button type="button" onClick={() => {setEditingProduct(null); setProdName(''); setProdPrice('');}} className="p-3 bg-gray-200 dark:bg-gray-700 rounded-xl font-bold">Cancelar</button>}
+                        {editingProduct && <button type="button" onClick={() => {setEditingProduct(null); setProdName(''); setProdPrice(''); setProdStockType('infinite'); setProdStockQty('');}} className="p-3 bg-gray-200 dark:bg-gray-700 rounded-xl font-bold">Cancelar</button>}
                         <button type="submit" className="p-3 bg-brand text-white rounded-xl font-bold flex items-center gap-2"><CheckCircle size={20} /> Salvar</button>
                       </div>
                     </form>
@@ -742,7 +806,7 @@
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="bg-gray-50 dark:bg-gray-900/50 border-b dark:border-gray-700 text-sm text-gray-500">
-                          <th className="p-4">Produto</th><th className="p-4 w-32">Preço</th><th className="p-4 w-24 text-center">Ações</th>
+                          <th className="p-4">Produto</th><th className="p-4 w-32">Preço</th><th className="p-4 w-32 text-center">Estoque</th><th className="p-4 w-24 text-center">Ações</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y dark:divide-gray-700">
@@ -750,8 +814,11 @@
                           <tr key={p.id}>
                             <td className="p-4 font-medium">{p.name}</td>
                             <td className="p-4 font-bold text-green-600 dark:text-green-400">{formatCurrency(p.price)}</td>
+                            <td className="p-4 text-center font-semibold text-gray-700 dark:text-gray-300">
+                              {p.stockType === 'finite' ? `${p.stockQuantity} un.` : '∞'}
+                            </td>
                             <td className="p-4 flex justify-center gap-2">
-                              <button onClick={() => {setEditingProduct(p); setProdName(p.name); setProdPrice(p.price);}} className="p-2 text-brand bg-brand/10 rounded-lg"><Edit2 size={18}/></button>
+                              <button onClick={() => {setEditingProduct(p); setProdName(p.name); setProdPrice(p.price); setProdStockType(p.stockType || 'infinite'); setProdStockQty(p.stockQuantity !== null ? p.stockQuantity : '');}} className="p-2 text-brand bg-brand/10 rounded-lg"><Edit2 size={18}/></button>
                               <button onClick={() => deleteProduct(p.id)} className="p-2 text-red-500 bg-red-50 dark:bg-red-900/30 rounded-lg"><Trash2 size={18}/></button>
                             </td>
                           </tr>
